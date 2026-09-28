@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>海洋采样同步</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;max-width:1050px;margin:32px auto;padding:0 18px}input,select,textarea,button{padding:7px;margin:3px}.card{border:1px solid #d9e1e8;border-radius:10px;padding:16px;margin:16px 0}pre,textarea{background:#f5f7f9;padding:12px;overflow:auto;width:100%;box-sizing:border-box}button{cursor:pointer}small{color:#667}</style></head>
+<body><h1>海洋科考采样与岸端同步</h1><p>将离线设备的一批站位、样本、交接和仪器文件提交到服务。本地 UUID 重复提交会幂等处理，冲突会进入隔离清单。</p>
+<div class="card"><h2>身份</h2><input id="user" value="member-a"><select id="role"><option>member</option><option>lead</option><option>editor</option></select><button onclick="refresh()">刷新全部</button> <label>航次 ID <input id="voyage" type="number" value="1"></label></div>
+<div class="card"><h2>离线批次 JSON</h2><textarea id="batch" rows="16">{"device_id":"tablet-A","records":[{"type":"station","local_uuid":"st-001","revision":1,"data":{"voyage_id":1,"station_code":"S-01","latitude":30.1,"longitude":122.0,"sampled_at":"2026-09-05T08:30:00+08:00","owner":"member-a"}},{"type":"sample","local_uuid":"sample-001","revision":1,"data":{"station_id":1,"sample_code":"W-001","sample_type":"water","depth_m":5,"storage_condition":"4C","owner":"member-a"}}]}</textarea><button onclick="syncBatch()">同步批次</button><pre id="syncResult">等待同步…</pre></div>
+<div class="card"><h2>数据与冲突</h2><pre id="data">等待刷新…</pre></div>
+<script>
+const auth=()=>({'Content-Type':'application/json','X-User':user.value,'X-Role':role.value});
+async function call(url,opts={}){const r=await fetch(url,opts);const j=await r.json();if(!r.ok)throw Error(j.error||r.status);return j}
+async function syncBatch(){try{syncResult.textContent=JSON.stringify(await call('/api/sync',{method:'POST',headers:auth(),body:batch.value}),null,2);refresh()}catch(e){syncResult.textContent=e.message}}
+async function refresh(){try{const [stations,samples,conflicts,files,custody]=await Promise.all(['/api/stations','/api/samples','/api/conflicts','/api/instrument-files','/api/custody'].map(u=>call(u)));data.textContent=JSON.stringify({stations,samples,conflicts,files,custody},null,2)}catch(e){data.textContent=e.message}}
+</script></body></html>

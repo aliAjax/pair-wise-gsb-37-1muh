@@ -1,0 +1,11 @@
+{
+  "projectId": "pair-wise-gsb-37",
+  "projectName": "pair-wise-gsb-37",
+  "category": "困难 Python 项目",
+  "businessDomain": "海洋科考",
+  "projectForm": "完整项目",
+  "codeScope": "backend, frontend",
+  "languages": ["Python", "HTML", "CSS", "JavaScript"],
+  "summary": "离线优先的海洋科考采样记录、岸端同步、编号冲突隔离和保管交接服务。",
+  "containerized": false
+}
