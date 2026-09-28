@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>冲突处置台 · 海洋采样同步</title>
+<style>
+  body{font:15px/1.5 system-ui,sans-serif;max-width:1180px;margin:24px auto;padding:0 18px;color:#1f2d3d}
+  h1{margin-bottom:4px}
+  h2{margin:6px 0 10px}
+  h3{margin:14px 0 8px}
+  .muted{color:#667;font-size:13px}
+  .card{border:1px solid #d9e1e8;border-radius:10px;padding:14px 16px;margin:14px 0;background:#fff}
+  .conflict{border-left:4px solid #c8d2dc;cursor:pointer}
+  .conflict.pending{border-left-color:#d98b2b}
+  .conflict.resolved{border-left-color:#3a9d6d;opacity:.82}
+  .conflict.open{box-shadow:0 0 0 2px #b9d6f2}
+  .badge{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;margin-left:6px}
+  .badge.pending{background:#fdeecd;color:#8a5413}
+  .badge.resolved{background:#dff5e9;color:#1f7a4c}
+  .badge.confirmed{background:#f3d9d9;color:#9a2a2a}
+  .badge.kind{background:#e8edf2;color:#33485c}
+  table{border-collapse:collapse;width:100%;margin:8px 0}
+  th,td{border:1px solid #e3e9ee;padding:6px 9px;text-align:left;vertical-align:top;font-size:14px}
+  th{background:#f5f7f9;white-space:nowrap}
+  td.val{max-width:300px;word-break:break-word}
+  pre{background:#f5f7f9;padding:10px;border-radius:8px;overflow:auto;max-height:260px;font-size:12.5px}
+  input,select,button,textarea{padding:6px 9px;margin:2px;border:1px solid #c4cdd5;border-radius:6px;font:inherit}
+  button{cursor:pointer;background:#f2f6fa}
+  button.primary{background:#2563a4;color:#fff;border-color:#2563a4}
+  button.offline{background:#a45625;color:#fff;border-color:#a45625}
+  button.merge{background:#3a7d44;color:#fff;border-color:#3a7d44}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .actions{margin:12px 0;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .alert{border:1px solid #e0b4b4;background:#fbf0f0;color:#7a1f1f;border-radius:8px;padding:10px 12px;margin:10px 0}
+  .alert .item{margin:3px 0}
+  .ok{border:1px solid #b4dcc4;background:#eef9f2;color:#1f6a42;border-radius:8px;padding:10px 12px;margin:10px 0}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:860px){.two{grid-template-columns:1fr}}
+  .field-choice label{white-space:nowrap;margin-right:6px}
+  .hidden{display:none}
+  .pill{font-size:12px;background:#eef2f6;border-radius:6px;padding:1px 7px;margin-right:6px;color:#33485c}
+</style>
+</head>
+<body>
+<h1>冲突处置台</h1>
+<p class="muted">多台设备补传同一站位或样本产生的隔离冲突在这里核对：对比岸端当前修订与离线来件，保留岸端、采用离线值或逐字段合并。提交时若记录已被改动、确认或编号被占用，会重新停在待核并列出争用项。</p>
+
+<div class="card">
+  <div class="row">
+    <label>处理人 <input id="user" value="lead-01"></label>
+    <label>角色
+      <select id="role"><option value="lead">lead（可处置）</option><option value="member">member</option><option value="viewer">viewer</option></select>
+    </label>
+    <label>航次
+      <select id="voyageFilter"><option value="all">全部航次</option></select>
+    </label>
+    <label>状态
+      <select id="statusFilter">
+        <option value="pending">待核</option>
+        <option value="resolved">已处置</option>
+        <option value="all">全部</option>
+      </select>
+    </label>
+    <button onclick="loadList()">刷新清单</button>
+    <a href="/">← 返回同步页</a>
+  </div>
+  <div id="permHint" class="alert hidden">只有 <b>lead</b> 角色可以提交处置；当前身份可查看核对内容。</div>
+</div>
+
+<div id="listView"><p class="muted">加载中…</p></div>
+<div id="detailView" class="hidden"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const store={filters:"wb.filters.v1",open:"wb.openConflict.v1",identity:"wb.identity.v1"};
+function headers(){return {'Content-Type':'application/json','X-User':$('user').value,'X-Role':$('role').value}}
+async function call(url,opts={}){
+  const r=await fetch(url,{...opts,headers:{...headers(),...(opts.headers||{})}});
+  const j=await r.json();
+  if(!r.ok){const e=new Error(j.error||('HTTP '+r.status));e.status=r.status;e.payload=j;throw e}
+  return j;
+}
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const isLead=()=>$('role').value==='lead';
+
+// ---- 身份与筛选：重开页面后接着处置 ----
+(function restoreIdentity(){
+  try{const v=JSON.parse(localStorage.getItem(store.identity)||'null');if(v){$('user').value=v.user;$('role').value=v.role}}catch(e){}
+  ['user','role'].forEach(id=>$(id).addEventListener('change',()=>{
+    localStorage.setItem(store.identity,JSON.stringify({user:$('user').value,role:$('role').value}));
+    loadList();
+  }));
+  let f={voyage:'all',status:'pending'};
+  try{Object.assign(f,JSON.parse(localStorage.getItem(store.filters)||'{}'))}catch(e){}
+  $('voyageFilter').value=f.voyage;$('statusFilter').value=f.status;
+  ['voyageFilter','statusFilter'].forEach(id=>$(id).addEventListener('change',()=>{
+    localStorage.setItem(store.filters,JSON.stringify({voyage:$('voyageFilter').value,status:$('statusFilter').value}));
+    loadList();
+  }));
+})();
+
+async function loadVoyages(){
+  const {items}=await call('/api/voyages');
+  const sel=$('voyageFilter'),cur=sel.value;
+  sel.innerHTML='<option value="all">全部航次</option>'+items.map(v=>`<option value="${v.id}">#${v.id} ${esc(v.code)} ${esc(v.name)}</option>`).join('');
+  if([...sel.options].some(o=>o.value===cur))sel.value=cur;
+}
+
+async function loadList(){
+  $('permHint').classList.toggle('hidden',isLead());
+  const voyage=$('voyageFilter').value,status=$('statusFilter').value;
+  const q=new URLSearchParams();
+  if(voyage!=='all')q.set('voyage_id',voyage);
+  if(status!=='all')q.set('status',status);
+  const box=$('listView');
+  try{
+    const {items}=await call('/api/conflicts?'+q.toString());
+    if(!items.length){box.innerHTML='<div class="card muted">当前筛选下没有冲突记录。</div>';return}
+    box.innerHTML=items.map(c=>{
+      const p=c.payload_json||{};
+      const code=p.station_code||p.sample_code||'—';
+      return `<div class="card conflict ${c.status}" id="row-${c.id}" onclick="openConflict(${c.id})">
+        <div><b>#${c.id}</b> <span class="pill">${esc(c.entity_type)}</span>
+          <span class="badge ${c.status}">${c.status==='pending'?'待核':'已处置'}</span>
+          <span class="badge kind">航次 ${c.voyage_id??'—'}</span></div>
+        <div class="muted" style="margin-top:4px">
+          设备 <b>${esc(c.device_id)}</b> · 本地编号 <b>${esc(c.local_uuid)}</b> · 业务编号 ${esc(code)}
+          · 离线来件 r${c.incoming_revision}${c.resolved_server_id?` · 岸端记录 #${c.resolved_server_id}`:''}
+          ${c.dup_server_id?` · 隔离副本 #${c.dup_server_id}`:''}
+        </div>
+        <div style="margin-top:4px">${esc(c.reason)}</div>
+      </div>`;
+    }).join('');
+    const openId=localStorage.getItem(store.open);
+    if(openId&&items.some(c=>String(c.id)===openId))openConflict(Number(openId),true);
+  }catch(e){box.innerHTML=`<div class="alert">${esc(e.message)}</div>`}
+}
+
+let CURRENT=null; // 当前正在核对的详情
+async function openConflict(id,fromRestore){
+  localStorage.setItem(store.open,String(id));
+  document.querySelectorAll('.conflict').forEach(el=>el.classList.toggle('open',el.id==='row-'+id));
+  const box=$('detailView');box.classList.remove('hidden');
+  try{
+    CURRENT=await call(`/api/conflicts/${id}/detail`);
+    box.innerHTML=renderDetail(CURRENT);
+    box.scrollIntoView({behavior:fromRestore?'auto':'smooth',block:'start'});
+  }catch(e){box.innerHTML=`<div class="alert">${esc(e.message)}</div>`}
+}
+function closeDetail(){
+  localStorage.removeItem(store.open);CURRENT=null;
+  $('detailView').classList.add('hidden');
+  document.querySelectorAll('.conflict.open').forEach(el=>el.classList.remove('open'));
+}
+
+const TYPE_LABEL={station:'站位',sample:'样本',custody:'保管事件',instrument_file:'仪器文件'};
+function renderDetail(d){
+  const c=d.conflict,off=d.offline;
+  const done=c.status==='resolved';
+  let body='';
+  if(!['station','sample'].includes(d.entity_type)){
+    body=`<div class="alert muted">${TYPE_LABEL[d.entity_type]}为追加/去重记录，不可覆盖，仅可保留岸端（标记此隔离项已核对）。</div>
+      <h3>离线来件内容</h3><pre>${esc(JSON.stringify(off,null,2))}</pre>
+      <div class="actions"><button class="primary" onclick="submit('keep_shore')" ${done?'disabled':''}>保留岸端（确认无需回写）</button></div>`;
+  }else if(d.target_missing){
+    body=`<div class="alert"><b>处置目标记录不存在</b>，可能已被清理。此冲突只能继续停在待核等待人工处理。</div>
+      <h3>离线来件内容</h3><pre>${esc(JSON.stringify(off,null,2))}</pre>`;
+  }else{
+    body=renderComparable(d);
+  }
+  return `<div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">#${c.id} ${TYPE_LABEL[c.entity_type]||c.entity_type} 核对
+        <span class="badge ${c.status}">${c.status==='pending'?'待核':'已处置'}</span>
+        ${d.confirmed?'<span class="badge confirmed">记录已确认锁定</span>':''}
+      </h2>
+      <button onclick="closeDetail()">收起</button>
+    </div>
+    <p class="muted" style="margin:6px 0">
+      设备 <b>${esc(c.device_id)}</b> · 本地编号 <b>${esc(c.local_uuid)}</b> · 来件修订 r${c.incoming_revision}
+      ${d.target_id?` · 岸端记录 #${d.target_id} · 当前修订 <b>r${d.current_revision}</b>`:''}
+    </p>
+    <div>隔离原因：${esc(c.reason)}</div>
+    ${d.dup_record?`<div class="alert muted">该编号曾被占用，离线来件已另存为隔离副本 <b>#${d.dup_record.id}（${esc(d.dup_record.station_code||d.dup_record.sample_code)}）</b>；处置只作用于岸端正本 #${d.target_id}，副本保留备查。</div>`:''}
+    ${body}
+    ${renderContentions(d)}
+    ${renderResolutions(d)}
+    ${d.history?renderHistory(d.history):''}
+  </div>`;
+}
+
+function renderComparable(d){
+  const shore=d.shore,off=d.offline;
+  const done=d.conflict.status==='resolved';
+  const fields=d.editable_fields;
+  const readonly=Object.keys(shore).filter(k=>!fields.includes(k)&&!['id'].includes(k));
+  const rows=fields.map(f=>{
+    const sv=shore[f]??'',ov=off[f];
+    const offMissing=ov===undefined;
+    const numeric=(f==='latitude'||f==='longitude'||f==='depth_m');
+    const custom=`<input type="${numeric?'number':'text'}" data-custom="${f}" value="${esc(sv)}" style="width:130px" oninput="pickCustom('${f}')" ${done?'disabled':''}>`;
+    return `<tr>
+      <td><b>${esc(fieldLabel(f))}</b></td>
+      <td class="val">${esc(sv)}${same(sv,ov)?' <span class="muted">（与离线一致）</span>':''}</td>
+      <td class="val">${offMissing?'<span class="muted">来件未提供</span>':esc(ov)}</td>
+      <td class="field-choice">
+        <label><input type="radio" name="pick-${f}" value="shore" checked onchange="toggleActions()" ${done?'disabled':''}> 岸端</label>
+        <label><input type="radio" name="pick-${f}" value="offline" ${offMissing?'disabled':''} onchange="toggleActions()" ${done?'disabled':''}> 离线</label>
+        <label><input type="radio" name="pick-${f}" value="custom" onchange="toggleActions()" ${done?'disabled':''}> 自定义</label>
+        ${custom}
+      </td></tr>`;
+  }).join('');
+  return `<h3>两份内容对比（当前修订 r${d.current_revision}）</h3>
+    <table><thead><tr><th>字段</th><th>岸端当前值</th><th>离线来件值</th><th>逐字段合并时取值</th></tr></thead><tbody>${rows}</tbody></table>
+    <h3>只读信息</h3>
+    <table><tbody>${readonly.map(k=>`<tr><th>${esc(k)}</th><td class="val">${esc(shore[k])}</td></tr>`).join('')}</tbody></table>
+    <label>处置备注 <input id="resNote" style="width:360px" placeholder="可选，记录处置依据" ${done?'disabled':''}></label>
+    <div class="actions">
+      <button class="primary" onclick="submit('keep_shore')" ${done?'disabled':''}>① 保留岸端</button>
+      <button class="offline" onclick="submit('take_offline')" ${done?'disabled':''}>② 采用离线值</button>
+      <button class="merge" id="mergeBtn" onclick="submit('merge')" ${done?'disabled':''}>③ 逐字段合并（按右列选择）</button>
+      <span class="muted" id="mergeHint">${done?'该冲突已处置，以下为处置时的只读回顾':''}</span>
+    </div>`;
+}
+
+function fieldLabel(f){return {station_code:'站位编号',sample_code:'样本编号',latitude:'纬度',longitude:'经度',sampled_at:'采样时间',notes:'备注',sample_type:'样本类型',depth_m:'深度(m)',storage_condition:'保存条件'}[f]||f}
+function same(a,b){return b!==undefined&&String(a)===String(b)}
+function pickCustom(f){document.querySelector(`input[name="pick-${f}"][value="custom"]`).checked=true;toggleActions()}
+function toggleActions(){
+  if(!CURRENT||!CURRENT.editable_fields)return;
+  const n=CURRENT.editable_fields.filter(f=>document.querySelector(`input[name="pick-${f}"]:checked`)?.value!=='shore').length;
+  $('mergeHint').textContent=n?`已对 ${n} 个字段采用非岸端值`:'未改动任何字段时等同保留岸端';
+}
+
+function buildMerged(d){
+  const merged={};
+  for(const f of d.editable_fields){
+    const choice=document.querySelector(`input[name="pick-${f}"]:checked`)?.value||'shore';
+    let v;
+    if(choice==='shore')v=d.shore[f];
+    else if(choice==='offline')v=d.offline[f]??d.shore[f];
+    else v=document.querySelector(`[data-custom="${f}"]`).value;
+    if(f==='latitude'||f==='longitude'||f==='depth_m')v=Number(v);
+    merged[f]=v;
+  }
+  return merged;
+}
+
+async function submit(action){
+  if(!CURRENT)return;
+  if(!isLead()){alert('只有 lead 角色可以提交处置');return}
+  const body={action,expected_revision:CURRENT.current_revision??0,note:$('resNote')?.value||''};
+  if(action==='merge')body.merged=buildMerged(CURRENT);
+  try{
+    const d=await call(`/api/conflicts/${CURRENT.conflict.id}/resolve`,{method:'POST',body:JSON.stringify(body)});
+    CURRENT=d;
+    $('detailView').innerHTML=renderDetail(d);
+    await loadList();
+  }catch(e){
+    if(e.status===409&&e.payload?.contentions){
+      // 提交时已被抢先：后端已把记录重新停在待核，刷新成最新数据并标出争用项。
+      CURRENT=e.payload.latest;
+      $('detailView').innerHTML=renderDetail(CURRENT);
+      await loadList();
+    }else{
+      alert(e.message);
+    }
+  }
+}
+
+const CONTENTION_LABEL={revision_changed:'当前修订已变更',confirmed:'记录已被确认锁定',code_taken:'业务编号已被占用',target_missing:'处置目标记录不存在'};
+function renderContentions(d){
+  if(!d.contentions||!d.contentions.length)return '';
+  const pending=d.conflict.status==='pending';
+  return `<h3>争用记录${pending?'（请按最新状态重新核对后再提交）':''}</h3>
+    <div class="alert">${d.contentions.map(x=>`<div class="item">
+      <b>${esc(CONTENTION_LABEL[x.kind]||x.kind)}</b>
+      ${x.expected_revision!=null?` · 提交基于 r${x.expected_revision}`:''}
+      ${x.actual_revision!=null?` · 实际 r${x.actual_revision}`:''}
+      ${x.detail?` · ${esc(x.detail)}`:''}
+      <span class="muted">${esc(x.actor)} @ ${esc(x.created_at)}</span>
+    </div>`).join('')}</div>`;
+}
+
+function renderResolutions(d){
+  if(!d.resolutions||!d.resolutions.length)return '';
+  return `<h3>处置记录</h3><table><thead><tr><th>方式</th><th>修订</th><th>处理人</th><th>时间</th><th>备注</th></tr></thead><tbody>
+    ${d.resolutions.map(r=>`<tr><td>${esc({keep_shore:'保留岸端',take_offline:'采用离线值',merge:'逐字段合并'}[r.action]||r.action)}</td>
+      <td>r${r.base_revision} → <b>r${r.new_revision}</b></td><td>${esc(r.actor)}</td>
+      <td>${esc(r.created_at)}</td><td>${esc(r.note||'—')}</td></tr>`).join('')}
+    </tbody></table>`;
+}
+
+function renderHistory(h){
+  return `<h3>修订历史（旧值可查，共 ${h.length} 条）</h3>
+    <details><summary>展开各修订快照</summary>${h.map(r=>`
+      <div class="card" style="margin:8px 0">
+        <div><b>r${r.revision}</b> <span class="pill">${esc(r.source)}</span> <span class="muted">${esc(r.actor)} · ${esc(r.created_at)}</span></div>
+        <pre>${esc(JSON.stringify(r.snapshot_json,null,2))}</pre>
+      </div>`).join('')}</details>`;
+}
+
+(async function init(){
+  await loadVoyages();
+  await loadList();
+})();
+</script>
+</body>
+</html>

@@ -40,6 +40,8 @@ python app.py --port 8008
 - 记录人员只能修改自己创建的站位/样本，`lead` 可以处理全部记录。
 - `lead` 确认样本或站位后，该记录变为只读；发现错误必须通过新记录处理，不能用同步覆盖历史。
 - 保管交接是追加式事件；仪器文件以 SHA-256 去重，原始内容相同但来自不同设备时只保存一次元数据。
+- 冲突不再只停在隔离清单：`lead` 在冲突处置台（<http://127.0.0.1:8008/conflicts>）按设备、本地编号、岸端当前修订和离线来件逐项核对，选择保留岸端、采用离线值或逐字段合并。提交携带所基于的修订号；提交时当前修订已变、记录已确认或业务编号已被占用，冲突会重新停在待核并写争用记录，处理人按最新状态重开后可继续处置。
+- 处置成功后岸端记录生成下一条修订（站位/样本保留全部历史快照，旧值可查），并写处置记录；同一设备再补传相同晚到内容会幂等识别为重复，处理结果以同步响应和 `GET /api/conflicts?device_id=` 回传船端。
 - 航次、站位、样本、交接、文件和冲突都保存在 SQLite 中，所有同步批次有审计记录。
 
 ## API
@@ -48,7 +50,9 @@ python app.py --port 8008
 - `POST /api/sync`：批量同步离线记录。
 - `POST /api/confirm/station/{id}` 或 `/api/confirm/sample/{id}`：负责人确认锁定。
 - `GET /api/stations`、`/api/samples`、`/api/custody`、`/api/instrument-files`：查询记录。
-- `GET /api/conflicts`：查看编号冲突、旧修订和权限冲突。
+- `GET /api/conflicts`：查看编号冲突、旧修订和权限冲突。支持 `voyage_id`、`status=pending|resolved|all`、`device_id` 筛选。
+- `GET /api/conflicts/{id}/detail`：处置台核对视图（设备、本地编号、岸端当前修订、离线内容、隔离副本、争用记录、处置记录、修订历史）。
+- `POST /api/conflicts/{id}/resolve`：提交处置。Body 为 `{"action":"keep_shore|take_offline|merge","expected_revision":<核对时的当前修订>,"merged":{...},"note":""}`；修订不匹配/已确认/编号被占用时返回 409 及 `contentions`，冲突保持 `pending`。仅 `lead` 可调用。
 - `GET /api/audit`：查看操作审计。
 
 ## 测试
@@ -57,4 +61,4 @@ python app.py --port 8008
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖完整离线同步、幂等重复、编号冲突、成员越权、旧修订、确认锁定、追加式交接和文件哈希去重。
+测试覆盖完整离线同步、幂等重复、编号冲突、成员越权、旧修订、确认锁定、追加式交接和文件哈希去重，以及冲突处置台的三种处置方式、乐观修订争用（修订变更/已确认/编号占用）、修订历史与船端幂等回传。
