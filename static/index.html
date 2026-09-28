@@ -1,13 +1,363 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>海洋采样同步</title>
-<style>body{font:15px/1.5 system-ui,sans-serif;max-width:1050px;margin:32px auto;padding:0 18px}input,select,textarea,button{padding:7px;margin:3px}.card{border:1px solid #d9e1e8;border-radius:10px;padding:16px;margin:16px 0}pre,textarea{background:#f5f7f9;padding:12px;overflow:auto;width:100%;box-sizing:border-box}button{cursor:pointer}small{color:#667}</style></head>
-<body><h1>海洋科考采样与岸端同步</h1><p>将离线设备的一批站位、样本、交接和仪器文件提交到服务。本地 UUID 重复提交会幂等处理，冲突会进入隔离清单。</p>
-<div class="card"><h2>身份</h2><input id="user" value="member-a"><select id="role"><option>member</option><option>lead</option><option>editor</option></select><button onclick="refresh()">刷新全部</button> <label>航次 ID <input id="voyage" type="number" value="1"></label></div>
-<div class="card"><h2>离线批次 JSON</h2><textarea id="batch" rows="16">{"device_id":"tablet-A","records":[{"type":"station","local_uuid":"st-001","revision":1,"data":{"voyage_id":1,"station_code":"S-01","latitude":30.1,"longitude":122.0,"sampled_at":"2026-09-05T08:30:00+08:00","owner":"member-a"}},{"type":"sample","local_uuid":"sample-001","revision":1,"data":{"station_id":1,"sample_code":"W-001","sample_type":"water","depth_m":5,"storage_condition":"4C","owner":"member-a"}}]}</textarea><button onclick="syncBatch()">同步批次</button><pre id="syncResult">等待同步…</pre></div>
-<div class="card"><h2>数据与冲突</h2><pre id="data">等待刷新…</pre></div>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>海洋采样同步 · 冲突处置台</title>
+<style>
+  :root{--line:#d9e1e8;--ink:#1f2d3d;--muted:#667;--bg:#f5f7f9;--blue:#2563eb;--red:#dc2626;--green:#16a34a;--amber:#d97706}
+  *{box-sizing:border-box}
+  body{font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);margin:0;background:#eef2f6}
+  header{background:#0f2742;color:#fff;padding:18px 22px}
+  header h1{margin:0;font-size:19px}
+  header p{margin:4px 0 0;color:#aec2d8;font-size:13px}
+  .wrap{max-width:1280px;margin:20px auto;padding:0 18px;display:grid;grid-template-columns:380px 1fr;gap:18px;align-items:start}
+  .card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+  .card h2{margin:0 0 10px;font-size:15px}
+  input,select,textarea,button{font:inherit;padding:6px 9px;border:1px solid #c3ccd6;border-radius:6px;background:#fff;color:inherit}
+  input[type=number]{width:80px}
+  button{cursor:pointer}
+  button.primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+  button.ghost{background:#fff}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  label{display:inline-flex;align-items:center;gap:6px;margin-right:10px}
+  .muted{color:var(--muted)}
+  pre{background:var(--bg);padding:10px;border-radius:6px;overflow:auto;font-size:12px;margin:6px 0}
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600}
+  .pill.pending{background:#fef3c7;color:#92400e}
+  .pill.resolved{background:#dcfce7;color:#166534}
+  .pill.station{background:#e0e7ff;color:#3730a3}
+  .pill.sample{background:#fce7f3;color:#9d174d}
+  .citem{border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px;cursor:pointer;background:#fff}
+  .citem:hover{border-color:var(--blue)}
+  .citem.active{border-color:var(--blue);box-shadow:0 0 0 2px rgba(37,99,235,.15)}
+  .citem .meta{font-size:12px;color:var(--muted);margin-top:3px}
+  .contend{border:1px solid #fca5a5;background:#fef2f2;border-radius:8px;padding:10px;margin:10px 0}
+  .contend b{color:var(--red)}
+  .okbox{border:1px solid #86efac;background:#f0fdf4;border-radius:8px;padding:10px;margin:10px 0;color:#166534}
+  .twocol{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .col h3{margin:0 0 4px;font-size:13px;color:var(--muted)}
+  .kv{display:grid;grid-template-columns:110px 1fr;gap:2px 8px;font-size:13px}
+  .kv .k{color:var(--muted)}
+  .diff-off{color:var(--amber);font-weight:600}
+  .merge-row{display:grid;grid-template-columns:130px 1fr 1fr;gap:8px;align-items:center;padding:6px 0;border-bottom:1px dashed #e3e9ef}
+  .merge-row .fname{font-weight:600}
+  .merge-row .vals{font-size:12px;min-width:0}
+  .merge-row .vals div{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .merge-row .shore{color:#334155}.merge-row .off{color:var(--amber)}
+  .decide{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+  .decide label{border:1px solid var(--line);border-radius:8px;padding:8px 10px;cursor:pointer;flex:1;min-width:150px;margin:0}
+  .decide label.sel{border-color:var(--blue);background:#eff6ff}
+  .decide small{display:block;color:var(--muted);font-weight:400}
+  .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+  table.hist{border-collapse:collapse;width:100%;font-size:12px}
+  table.hist th,table.hist td{border-bottom:1px solid #e6ebf0;padding:4px 6px;text-align:left;vertical-align:top}
+  .hidden{display:none}
+  .full{grid-column:1/-1}
+</style>
+</head>
+<body>
+<header>
+  <h1>海洋科考采样与岸端同步 · 冲突处置台</h1>
+  <p>补传数据进入隔离清单后，按航次/状态筛选，核对设备、本地编号、离线内容与当前修订，选择保留岸端、采用离线值或逐字段合并。提交时若修订已变、记录已确认或编号被占用，会重新停在待核并列出争用项。</p>
+</header>
+
+<div class="wrap">
+  <!-- 左栏 -->
+  <div>
+    <div class="card">
+      <h2>身份</h2>
+      <input id="user" value="lead-01">
+      <select id="role"><option value="lead">lead（负责人）</option><option value="member">member</option><option value="editor">editor</option><option value="viewer">viewer</option></select>
+    </div>
+
+    <div class="card">
+      <h2>筛选</h2>
+      <div class="toolbar">
+        <label>航次 <select id="fVoyage"><option value="">全部</option></select></label>
+        <label>状态
+          <select id="fStatus"><option value="">全部</option><option value="pending">待核</option><option value="resolved">已处置</option></select>
+        </label>
+        <button class="ghost" onclick="loadConflicts()">刷新</button>
+      </div>
+      <div id="clist" class="muted">加载中…</div>
+    </div>
+
+    <div class="card">
+      <h2>离线批次补传</h2>
+      <textarea id="batch" rows="10" style="width:100%"></textarea>
+      <div style="margin-top:8px"><button class="primary" onclick="syncBatch()">同步批次</button></div>
+      <pre id="syncResult" class="hidden"></pre>
+    </div>
+  </div>
+
+  <!-- 右栏：处置台 -->
+  <div>
+    <div class="card" id="deskEmpty">
+      <h2>冲突处置台</h2>
+      <p class="muted">从左侧选择一条待核或已处置的冲突。处理中的草稿、筛选与选择会保存在本浏览器，重开页面可接着处置。</p>
+    </div>
+
+    <div id="desk" class="hidden">
+      <div class="card">
+        <h2>冲突 #<span id="dId"></span>
+          <span id="dType" class="pill"></span>
+          <span id="dStatus" class="pill"></span>
+        </h2>
+        <div class="kv">
+          <span class="k">设备</span><span id="dDevice"></span>
+          <span class="k">本地编号</span><span id="dLocal"></span>
+          <span class="k">入库记录</span><span id="dServer"></span>
+          <span class="k">隔离原因</span><span id="dReason"></span>
+          <span class="k">当前修订</span><span><b id="dRev"></b>（提交将基于该修订）</span>
+          <span class="k">历史尝试</span><span id="dAttempts"></span>
+        </div>
+        <div id="dConfirmedWarn" class="contend hidden">该记录已被负责人确认锁定，任何处置都会被拒绝，只能新建记录处理。</div>
+        <div id="contention" class="contend hidden"></div>
+        <div id="resolvedBox" class="okbox hidden"></div>
+      </div>
+
+      <div class="card">
+        <h2>两份内容</h2>
+        <div class="twocol">
+          <div class="col"><h3>离线补传（<span id="oDev"></span>）</h3><pre id="offJson"></pre></div>
+          <div class="col"><h3>岸端当前值 · 修订 <span id="cRev"></span></h3><pre id="curJson"></pre></div>
+        </div>
+      </div>
+
+      <div class="card" id="actionCard">
+        <h2>核对并选择处置</h2>
+        <div class="decide">
+          <label data-dec="keep_shore"><input type="radio" name="dec" value="keep_shore">保留岸端<small>不改内容，仅生成处置记录与新修订</small></label>
+          <label data-dec="take_offline"><input type="radio" name="dec" value="take_offline">采用离线值<small>离线携带的字段覆盖岸端</small></label>
+          <label data-dec="merge"><input type="radio" name="dec" value="merge">逐字段合并<small>逐字段选择岸端/离线/手填</small></label>
+        </div>
+        <div id="mergeBox" class="hidden">
+          <p class="muted" style="margin:6px 0">逐字段勾选来源；默认全部保留岸端，只有你改动的字段会采用离线值或手填值。</p>
+          <div id="mergeRows"></div>
+        </div>
+        <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
+          <button class="primary" id="submitBtn" onclick="submitResolution()">提交处置</button>
+          <span class="muted" id="draftHint"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>修订历史（旧值仍可查）</h2>
+        <div id="histBox" class="muted">暂无修订。</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
-const auth=()=>({'Content-Type':'application/json','X-User':user.value,'X-Role':role.value});
-async function call(url,opts={}){const r=await fetch(url,opts);const j=await r.json();if(!r.ok)throw Error(j.error||r.status);return j}
-async function syncBatch(){try{syncResult.textContent=JSON.stringify(await call('/api/sync',{method:'POST',headers:auth(),body:batch.value}),null,2);refresh()}catch(e){syncResult.textContent=e.message}}
-async function refresh(){try{const [stations,samples,conflicts,files,custody]=await Promise.all(['/api/stations','/api/samples','/api/conflicts','/api/instrument-files','/api/custody'].map(u=>call(u)));data.textContent=JSON.stringify({stations,samples,conflicts,files,custody},null,2)}catch(e){data.textContent=e.message}}
-</script></body></html>
+const $=id=>document.getElementById(id);
+const auth=()=>({'Content-Type':'application/json','X-User':$('user').value,'X-Role':$('role').value});
+let CONFLICTS=[], DETAIL=null, FIELDS=[];
+
+const DEMO_BATCH={device_id:"tablet-B",records:[
+ {type:"station",local_uuid:"st-b-001",revision:1,data:{voyage_id:1,station_code:"S-01",latitude:30.2,longitude:122.1,sampled_at:"2026-09-05T08:45:00+08:00",owner:"member-b",notes:"补传：甲板复核坐标"}},
+ {type:"sample",local_uuid:"sample-b-001",revision:1,data:{station_id:1,sample_code:"W-001",sample_type:"water",depth_m:6,storage_condition:"negative-20C",owner:"member-b"}}
+]};
+$('batch').value=JSON.stringify(DEMO_BATCH,null,2);
+
+const LS_KEY='ocean_desk_v1';
+const store={
+  load(){try{return JSON.parse(localStorage.getItem(LS_KEY))||{}}catch(e){return{}}},
+  save(s){localStorage.setItem(LS_KEY,JSON.stringify(s))}
+};
+function draft(){return Object.assign({voyage:'',status:'pending',cid:null,user:'lead-01',role:'lead',decision:'merge',merge:{}},store.load())}
+function persist(patch){const d=draft();Object.assign(d,patch);store.save(d)}
+
+async function call(url,opts={}){
+  const r=await fetch(url,Object.assign({headers:auth()},opts));
+  const j=await r.json().catch(()=>({error:'非 JSON 响应'}));
+  if(!r.ok)throw Error(j.error||('HTTP '+r.status));
+  return j;
+}
+
+async function loadVoyages(){
+  const {items}=await call('/api/voyages');
+  const sel=$('fVoyage'),cur=draft().voyage;
+  sel.innerHTML='<option value="">全部航次</option>'+items.map(v=>`<option value="${v.id}">${v.id} · ${v.code}</option>`).join('');
+  sel.value=cur||'';
+}
+async function loadConflicts(){
+  const d=dft();
+  const p=new URLSearchParams();
+  if(d.voyage)p.set('voyage_id',d.voyage);
+  if(d.status)p.set('status',d.status);
+  const {items}=await call('/api/conflicts?'+p.toString());
+  CONFLICTS=items;
+  const box=$('clist');
+  if(!items.length){box.innerHTML='<div class="muted">没有符合条件的冲突。可先在左下补传一批数据。</div>';return}
+  box.innerHTML=items.map(c=>`
+    <div class="citem${d.cid===c.id?' active':''}" onclick="selectConflict(${c.id})">
+      <span class="pill ${c.entity_type}">${c.entity_type==='station'?'站位':'样本'}</span>
+      <span class="pill ${c.status}">${c.status==='pending'?'待核':'已处置'}</span>
+      <div class="meta">${c.device_id} · ${c.local_uuid} · #${c.id}</div>
+      <div class="meta">${(c.reason||'').slice(0,46)}</div>
+    </div>`).join('');
+}
+async function selectConflict(id){
+  persist({cid:id});
+  await renderDetail();
+  await loadConflicts();
+}
+function dft(){return draft()}
+
+async function renderDetail(){
+  const d=dft();
+  DETAIL=await call('/api/conflicts/'+d.cid);
+  $('deskEmpty').classList.add('hidden');
+  $('desk').classList.remove('hidden');
+  const c=DETAIL;
+  $('dId').textContent=c.id;
+  const tp=$('dType');tp.textContent=c.entity_type==='station'?'站位':'样本';tp.className='pill '+c.entity_type;
+  const sp=$('dStatus');sp.textContent=c.status==='pending'?'待核':'已处置';sp.className='pill '+c.status;
+  $('dDevice').textContent=c.device_id;
+  $('dLocal').textContent=c.local_uuid;
+  $('dServer').textContent=c.resolved_server_id!=null?('#'+c.resolved_server_id):'（无关联入库记录，不可在处置台合并）';
+  $('dReason').textContent=c.reason;
+  $('dRev').textContent=c.current_revision??'—';
+  $('cRev').textContent=c.current_revision??'—';
+  $('dAttempts').textContent=c.attempts;
+  $('oDev').textContent=c.device_id;
+  $('offJson').textContent=JSON.stringify(c.incoming,null,2);
+  $('curJson').textContent=c.current?JSON.stringify(stripMeta(c.current),null,2):'（已入库记录不存在）';
+  $('dConfirmedWarn').classList.toggle('hidden',!(c.current&&c.current.confirmed));
+
+  // contention
+  const box=$('contention');
+  if(c.contention&&c.contention.length){
+    box.classList.remove('hidden');
+    box.innerHTML='<b>提交被拒，重新停在待核：</b><ul style="margin:6px 0 0 18px">'+
+      c.contention.map(x=>`<li><b>${contentionName(x.type)}</b>：${x.message}</li>`).join('')+'</ul>';
+  }else box.classList.add('hidden');
+
+  // resolved info
+  const rb=$('resolvedBox');
+  if(c.status==='resolved'&&c.resolution){
+    rb.classList.remove('hidden');
+    rb.innerHTML=`已由 ${c.resolved_by} 于 ${c.resolved_at} 处置：<b>${decisionName(c.resolution.decision)}</b>，修订 ${c.resolution.old_revision} → ${c.resolution.new_revision}`;
+  }else rb.classList.add('hidden');
+
+  buildMerge(c);
+  renderHistory(c);
+  lockIfNeeded(c);
+}
+
+function stripMeta(o){const{id,confirmed,revision,updated_at,...rest}=o;return rest}
+function contentionName(t){return {revision_changed:'当前修订已变',confirmed:'记录已确认',code_taken:'编号已被占用',missing:'入库记录缺失'}[t]||t}
+function decisionName(d){return {keep_shore:'保留岸端',take_offline:'采用离线值',merge:'逐字段合并'}[d]||d}
+
+function buildMerge(c){
+  if(!c.current){$('mergeBox').classList.add('hidden');FIELDS=[];return}
+  const editable=c.entity_type==='station'
+    ?['station_code','latitude','longitude','sampled_at','owner','notes']
+    :['sample_code','sample_type','depth_m','storage_condition','owner'];
+  FIELDS=editable;
+  const dr=dft();
+  if(!dr.merge)dr.merge={};
+  const cur=stripMeta(c.current), off=c.incoming||{};
+  $('mergeRows').innerHTML=editable.map(f=>{
+    const shore=fmt(cur[f]), offv=(f in off)?fmt(off[f]):null;
+    const state=(dr.merge[f]&&dr.merge[f].state)||'shore';
+    const manual=(dr.merge[f]&&dr.merge[f].manual)??'';
+    const canOff=offv!==null;
+    return `<div class="merge-row">
+      <div class="fname">${f}</div>
+      <div class="vals">
+        <div class="shore">岸端：${shore}</div>
+        <div class="off">${canOff?('离线：'+offv):'<span class="muted">离线未提供</span>'}</div>
+      </div>
+      <div>
+        <select data-f="${f}" onchange="onMerge(this)">
+          <option value="shore"${state==='shore'?' selected':''}>保留岸端</option>
+          <option value="offline"${state==='offline'?' selected':''}${canOff?'':' disabled'}>采用离线</option>
+          <option value="manual"${state==='manual'?' selected':''}>手填</option>
+        </select>
+        <input data-m="${f}" value="${esc(manual)}" placeholder="手填值" oninput="onMergeManual(this)"
+          style="width:110px;margin-top:4px" class="${state==='manual'?'':'hidden'}">
+      </div>
+    </div>`;
+  }).join('');
+  syncDecisionUI();
+}
+function fmt(v){return v===null||v===undefined||v===''?'（空）':String(v)}
+function esc(s){return String(s).replace(/"/g,'&quot;')}
+function onMerge(sel){const f=sel.dataset.f,dr=dft();dr.merge[f]=Object.assign(dr.merge[f]||{},{state:sel.value});persist({merge:dr.merge});
+  sel.closest('.merge-row').querySelector('[data-m]').classList.toggle('hidden',sel.value!=='manual');}
+function onMergeManual(inp){const f=inp.dataset.m,dr=dft();dr.merge[f]=Object.assign(dr.merge[f]||{state:'manual'},{manual:inp.value,state:'manual'});persist({merge:dr.merge})}
+
+function syncDecisionUI(){
+  const d=dft();
+  document.querySelectorAll('.decide label').forEach(l=>l.classList.toggle('sel',l.dataset.dec===d.decision));
+  document.querySelectorAll('input[name=dec]').forEach(r=>r.checked=(r.value===d.decision));
+  $('mergeBox').classList.toggle('hidden',d.decision!=='merge');
+}
+document.addEventListener('change',e=>{
+  if(e.target.name==='dec'){persist({decision:e.target.value});syncDecisionUI()}
+});
+$('role').onchange=function(){persist({role:this.value})};
+
+function lockIfNeeded(c){
+  const locked=c.status==='resolved'||!c.resolved_server_id||(c.current&&c.current.confirmed);
+  $('submitBtn').disabled=locked;
+  $('actionCard').style.opacity=locked?'.7':'1';
+}
+
+async function submitResolution(){
+  const d=dft(), c=DETAIL;
+  const body={decision:d.decision,base_revision:c.current_revision};
+  if(d.decision==='merge'){
+    const fv={};
+    FIELDS.forEach(f=>{
+      const m=(d.merge[f]||{});
+      if(m.state==='offline' && f in c.incoming) fv[f]=c.incoming[f];
+      else if(m.state==='manual' && m.manual!=='') fv[f]=coerce(f,m.manual);
+    });
+    body.field_values=fv;
+  }
+  $('submitBtn').disabled=true;
+  try{
+    const res=await call('/api/conflicts/'+c.id+'/resolve',{method:'POST',body:JSON.stringify(body)});
+    await renderDetail();await loadConflicts();
+  }catch(e){
+    alert('提交失败：'+e.message);
+  }finally{$('submitBtn').disabled=false}
+}
+function coerce(f,v){if(['latitude','longitude','depth_m','station_id','parent_sample_id'].includes(f))return Number(v);return v}
+
+function renderHistory(c){
+  const box=$('histBox');
+  if(!c.revisions||!c.revisions.length){box.textContent='暂无修订。';return}
+  box.innerHTML='<table class="hist"><tr><th>修订</th><th>来源</th><th>操作人</th><th>时间</th><th>内容（旧值快照）</th></tr>'+
+    c.revisions.map(r=>`<tr><td>${r.revision}</td><td>${r.source}${r.conflict_id?(' · 冲突#'+r.conflict_id):''}</td>
+      <td>${r.created_by}</td><td>${r.created_at}</td><td><pre style="margin:0">${esc(JSON.stringify(r.snapshot,null,1))}</pre></td></tr>`).join('</table>')+'</table>';
+}
+
+async function syncBatch(){
+  try{
+    const res=await call('/api/sync',{method:'POST',body:$('batch').value});
+    const sr=$('syncResult');sr.classList.remove('hidden');
+    sr.textContent=JSON.stringify(res,null,2);
+    await loadVoyages();await loadConflicts();
+  }catch(e){const sr=$('syncResult');sr.classList.remove('hidden');sr.textContent='错误：'+e.message}
+}
+
+(async function init(){
+  const d=dft();
+  $('user').value=d.user;$('role').value=d.role;
+  $('fVoyage').value=d.voyage;$('fStatus').value=d.status;
+  await loadVoyages();
+  $('fVoyage').value=d.voyage;
+  await loadConflicts();
+  if(d.cid && CONFLICTS.some(c=>c.id===d.cid)){await renderDetail()}
+  $('fVoyage').onchange=function(){persist({voyage:this.value});loadConflicts()};
+  $('fStatus').onchange=function(){persist({status:this.value});loadConflicts()};
+  $('user').onchange=function(){persist({user:this.value})};
+})();
+</script>
+</body>
+</html>
